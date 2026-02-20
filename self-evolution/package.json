@@ -1,0 +1,8 @@
+{
+  "name": "self-evolution",
+  "version": "0.3.0",
+  "description": "Self-evolution engine for OpenClaw agents",
+  "main": "index.js",
+  "author": "Oliver Lin",
+  "license": "MIT"
+}

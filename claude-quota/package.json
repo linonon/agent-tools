@@ -1,0 +1,8 @@
+{
+  "name": "claude-quota",
+  "version": "1.0.0",
+  "description": "Check Claude Code subscription quota via Anthropic OAuth API",
+  "main": "quota.py",
+  "author": "Oliver Lin",
+  "license": "MIT"
+}
