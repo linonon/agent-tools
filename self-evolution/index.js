@@ -20,6 +20,10 @@ const COMMANDS = {
     desc: 'Run full evolution cycle (analyze → generate fixes → execute)',
     fn: runFixCycle,
   },
+  loop: {
+    desc: 'Closed-loop: analyze → classify → auto-fix low-risk → report high-risk',
+    fn: runLoop,
+  },
   history: {
     desc: 'Show fix execution history',
     fn: showHistory,
@@ -126,6 +130,67 @@ function extractRecommendationsFromReport(reportText) {
 }
 
 /**
+ * Closed-loop cycle (v0.4):
+ * analyze → classify → auto-fix low-risk → report high-risk to pending-actions.md
+ */
+async function runLoop() {
+  const args = process.argv.slice(3);
+  const dryRun = args.includes('--dry-run');
+
+  console.log(`\n🔄 Self-Evolution Loop v0.4${dryRun ? ' (DRY RUN)' : ''}\n`);
+
+  // Step 1: Analyze
+  console.log('📊 Step 1: Analyzing sessions...\n');
+  await analyze();
+
+  // Step 2: Load report
+  const reportPath = path.join(__dirname, 'analysis-report.md');
+  let reportText;
+  try {
+    reportText = await fs.readFile(reportPath, 'utf8');
+  } catch (_) {
+    console.error('❌ Failed to load analysis report');
+    return;
+  }
+
+  // Step 3: Extract recommendations
+  const recommendations = extractRecommendationsFromReport(reportText);
+  if (recommendations.length === 0) {
+    console.log('\n✨ No issues found — system is healthy!');
+    return;
+  }
+  console.log(`\n🔍 Step 2: Found ${recommendations.length} recommendations`);
+
+  // Step 4: Generate fix tasks
+  const fixTasks = generateFixTasks(recommendations);
+  if (fixTasks.length === 0) {
+    console.log('   No automated fixes available');
+    return;
+  }
+
+  // Step 5: Execute with classification (auto-approve low-risk)
+  console.log(`\n⚡ Step 3: Executing fixes (low-risk auto, high-risk → pending)...\n`);
+  const results = await executeFixes(fixTasks, {
+    dryRun,
+    autoApprove: !dryRun,
+  });
+
+  // Step 6: Summary
+  console.log('\n📈 Loop Summary:');
+  console.log(`   Total tasks    : ${results.total}`);
+  console.log(`   Auto-executed  : ${results.executed}`);
+  console.log(`   ✅ Succeeded   : ${results.succeeded}`);
+  console.log(`   ❌ Failed      : ${results.failed}`);
+  console.log(`   📌 High-risk   : ${results.pendingHuman} (written to pending-actions.md)`);
+
+  if (dryRun) {
+    console.log('\n💡 Run without --dry-run to apply fixes');
+  } else if (results.pendingHuman > 0) {
+    console.log('\n⚠️  Check pending-actions.md for tasks that need manual review');
+  }
+}
+
+/**
  * Show fix execution history
  */
 async function showHistory() {
@@ -154,7 +219,7 @@ async function showHistory() {
 }
 
 function printHelp() {
-  console.log('Self-Evolution Skill v0.2.0\n');
+  console.log('Self-Evolution Skill v0.4.0\n');
   console.log('Usage: node index.js [command] [options]\n');
   console.log('Commands:');
   for (const [name, { desc }] of Object.entries(COMMANDS)) {
@@ -163,6 +228,8 @@ function printHelp() {
   console.log('\nOptions for "fix" command:');
   console.log('  --execute       Actually execute fixes (default: dry-run)');
   console.log('  --auto-approve  Skip manual approval for each fix');
+  console.log('\nOptions for "loop" command:');
+  console.log('  --dry-run       Show plan only, do not execute');
   console.log('');
 }
 

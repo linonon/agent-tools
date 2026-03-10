@@ -1,18 +1,15 @@
 # Self-Evolution Analysis Report
 
-Generated: 2026-02-20T06:29:15.084Z
+Generated: 2026-03-10T02:00:31.837Z
 
 ## Error Summary
 
-### tool_error (1 occurrences)
-
-- **Tool:** N/A
-  **Error:** {"role":"toolResult","toolCallId":"toolu_01PJ2FyyZrMpsD6crhdJzA4W","toolName":"read","content":[{"type":"text","text":"{\n  \"status\": \"error\",\n  \"tool\": \"read\",\n  \"error\": \"ENOENT: no suc
+No errors detected in recent sessions. ✅
 
 ## Tool Usage Statistics
 
-- **process**: 5 calls
-- **read**: 2 calls
-- **exec**: 2 calls
-- **message**: 1 calls
+- **web_search**: 2 calls
+- **read**: 1 calls
+- **exec**: 1 calls
+- **web_fetch**: 1 calls
 

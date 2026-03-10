@@ -1,123 +1,196 @@
 /**
- * Fix Executor - Execute auto-fix tasks via sessions_spawn
+ * Fix Executor v0.4 - Closed-loop auto-fix with risk classification
+ *
+ * low_risk  → execute → validate → rollback on failure → report
+ * high_risk → generate suggestion → write to pending-actions.md
  */
 
 const fs = require('fs').promises;
 const path = require('path');
+const { classifyTasks } = require('./lib/classifier');
+const { validateConfig, healthCheck, backupFile, rollbackFile } = require('./lib/validator');
 
 const FIXES_HISTORY_PATH = path.join(__dirname, 'fixes-history.json');
+const WORKSPACE = path.join(require('os').homedir(), '.openclaw', 'workspace');
+const PENDING_ACTIONS_PATH = path.join(WORKSPACE, 'pending-actions.md');
 
 /**
- * Execute fix tasks
+ * Execute fix tasks (v0.4 entry point)
  * @param {Array} tasks - Fix tasks from fixer
  * @param {Object} options - { dryRun: bool, autoApprove: bool }
  * @returns {Object} Execution results
  */
 async function executeFixes(tasks, options = {}) {
   const { dryRun = true, autoApprove = false } = options;
-  
-  console.log(`\n🔧 Fix Executor${dryRun ? ' (DRY RUN)' : ''}\n`);
-  
+
+  console.log(`\n🔧 Fix Executor v0.4${dryRun ? ' (DRY RUN)' : ''}\n`);
+
+  // Classify tasks by risk level
+  const { lowRisk, highRisk } = classifyTasks(tasks);
+
+  console.log(`📊 Classification: ${lowRisk.length} low-risk, ${highRisk.length} high-risk\n`);
+
   const results = {
     total: tasks.length,
     executed: 0,
     succeeded: 0,
     failed: 0,
     skipped: 0,
-    fixes: []
+    pendingHuman: highRisk.length,
+    fixes: [],
   };
 
-  for (const task of tasks) {
-    console.log(`\n📋 Task: ${task.id}`);
-    console.log(`   Priority: ${task.priority}`);
-    console.log(`   Type: ${task.type}`);
-    console.log(`   Description: ${task.description}`);
-    console.log(`\n   Strategy:`);
-    console.log(`   ${JSON.stringify(task.strategy.action, null, 2)}`);
+  // ── Low-risk: auto-execute ───────────────────────────────────────────────
+  for (const task of lowRisk) {
+    console.log(`\n📋 [LOW RISK] ${task.id}`);
+    console.log(`   Type: ${task.type} | Priority: ${task.priority}`);
+    console.log(`   ${task.description}`);
 
     if (dryRun) {
-      console.log(`\n   ⚠️  DRY RUN - Task not executed`);
+      console.log(`   ⚠️  DRY RUN - would auto-execute`);
       results.skipped++;
       continue;
     }
 
-    // Check if we should execute (manual approval or auto-approve)
     if (!autoApprove) {
-      console.log(`\n   ⏸️  Manual approval required (use --auto-approve to skip)`);
+      console.log(`   ⏸️  Manual approval required (use --auto-approve to skip)`);
       results.skipped++;
       continue;
     }
 
-    // Execute via sessions_spawn
-    const fixResult = await executeFixTask(task);
+    const fixResult = await executeLowRiskTask(task);
     results.fixes.push(fixResult);
-    
+    results.executed++;
+
     if (fixResult.status === 'success') {
       results.succeeded++;
       console.log(`   ✅ Fix succeeded`);
     } else {
       results.failed++;
-      console.log(`   ❌ Fix failed: ${fixResult.error}`);
+      const rolled = fixResult.rolledBack ? ' (rolled back)' : '';
+      console.log(`   ❌ Fix failed${rolled}: ${fixResult.error}`);
     }
-    
-    results.executed++;
   }
 
-  // Save to history
+  // ── High-risk: write to pending-actions.md ───────────────────────────────
+  if (highRisk.length > 0) {
+    console.log(`\n⚠️  High-risk tasks (${highRisk.length}) → pending-actions.md`);
+    await writePendingActions(highRisk);
+    for (const task of highRisk) {
+      console.log(`   📌 ${task.type}: ${task.description}`);
+    }
+  }
+
+  // Save history
   await saveFixesHistory(results.fixes);
 
   return results;
 }
 
 /**
- * Execute a single fix task via sessions_spawn
+ * Execute a single low-risk task with validation + rollback
  */
-async function executeFixTask(task) {
+async function executeLowRiskTask(task) {
   const startTime = Date.now();
-  
+
   try {
-    // Generate fix prompt for the sub-agent
     const fixPrompt = buildFixPrompt(task);
-    
-    // Note: In actual use, this would call sessions_spawn via OpenClaw
-    // For now, we return a mock result structure
-    const result = {
-      taskId: task.id,
-      type: task.type,
-      priority: task.priority,
-      status: 'pending',
-      prompt: fixPrompt,
-      startTime,
-      endTime: null,
-      error: null,
-      sessionKey: null // Will be set by sessions_spawn
+
+    // --- workspace_file / missing_file: no restart needed ---
+    if (['workspace_file', 'missing_file', 'cron_prompt'].includes(task.type)) {
+      return {
+        taskId: task.id,
+        type: task.type,
+        priority: task.priority,
+        riskLevel: 'low_risk',
+        status: 'pending_agent',
+        prompt: fixPrompt,
+        startTime,
+        endTime: Date.now(),
+        error: null,
+        note: 'Prompt generated. Execute via sessions_spawn in loop mode.',
+      };
+    }
+
+    // --- config: validate → restart → health check ---
+    if (task.type === 'config') {
+      const configPath = task.strategy?.configPath;
+      if (!configPath) {
+        throw new Error('task.strategy.configPath is required for config type');
+      }
+
+      const backupPath = await backupFile(configPath);
+
+      // Apply the change (strategy provides the new content or a patch)
+      if (task.strategy?.newContent) {
+        await fs.writeFile(configPath, task.strategy.newContent, 'utf8');
+      } else {
+        throw new Error('task.strategy.newContent required for config fix');
+      }
+
+      // Validate
+      const validation = await validateConfig();
+      if (!validation.valid) {
+        await rollbackFile(configPath, backupPath);
+        throw new Error(`Config invalid after fix, rolled back: ${validation.errors.join(', ')}`);
+      }
+
+      // Health check (don't restart for every config change; let caller decide)
+      const health = await healthCheck();
+      if (!health.healthy) {
+        await rollbackFile(configPath, backupPath);
+        throw new Error(`Health check failed, rolled back: ${health.details}`);
+      }
+
+      return {
+        taskId: task.id, type: task.type, priority: task.priority,
+        riskLevel: 'low_risk', status: 'success', backupPath,
+        startTime, endTime: Date.now(), error: null, rolledBack: false,
+      };
+    }
+
+    // Fallback: generate prompt for agent
+    return {
+      taskId: task.id, type: task.type, priority: task.priority,
+      riskLevel: 'low_risk', status: 'pending_agent', prompt: fixPrompt,
+      startTime, endTime: Date.now(), error: null,
     };
 
-    // TODO: Replace with actual sessions_spawn call
-    // const spawnResult = await sessions_spawn({
-    //   task: fixPrompt,
-    //   label: `fix-${task.id}`,
-    //   cleanup: 'keep',
-    //   runTimeoutSeconds: 300
-    // });
-    // result.sessionKey = spawnResult.sessionKey;
-
-    result.endTime = Date.now();
-    result.status = 'success'; // Mock success for now
-    
-    return result;
-    
-  } catch (error) {
+  } catch (err) {
     return {
-      taskId: task.id,
-      type: task.type,
-      priority: task.priority,
-      status: 'failed',
-      startTime,
-      endTime: Date.now(),
-      error: error.message
+      taskId: task.id, type: task.type, priority: task.priority,
+      riskLevel: 'low_risk', status: 'failed', rolledBack: err.message?.includes('rolled back') ?? false,
+      startTime, endTime: Date.now(), error: err.message,
     };
   }
+}
+
+/**
+ * Write high-risk tasks to pending-actions.md
+ */
+async function writePendingActions(tasks) {
+  const now = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' });
+
+  let existing = '';
+  try {
+    existing = await fs.readFile(PENDING_ACTIONS_PATH, 'utf8');
+  } catch (_) {}
+
+  const newSection = tasks.map(t => {
+    const steps = t.strategy?.action?.steps || [];
+    return [
+      `### [${t.priority.toUpperCase()}] ${t.type}: ${t.description}`,
+      `- **風險等級**: high_risk（需人工確認）`,
+      `- **建議操作**:`,
+      ...steps.map(s => `  - ${s}`),
+      '',
+    ].join('\n');
+  }).join('\n');
+
+  const header = `## 待確認操作 (${now})\n\n`;
+  const content = header + newSection + '\n---\n\n' + existing;
+
+  await fs.writeFile(PENDING_ACTIONS_PATH, content, 'utf8');
 }
 
 /**
@@ -125,51 +198,39 @@ async function executeFixTask(task) {
  */
 function buildFixPrompt(task) {
   const { type, description, strategy } = task;
-  
-  let prompt = `# Auto-Fix Task: ${type}\n\n`;
-  prompt += `**Problem:** ${description}\n\n`;
-  prompt += `**Action Plan:**\n`;
-  
-  for (const [i, step] of strategy.action.steps.entries()) {
-    prompt += `${i + 1}. ${step}\n`;
-  }
-  
-  prompt += `\n**Instructions:**\n`;
-  prompt += `- Follow the action plan step by step\n`;
-  prompt += `- Document what you did\n`;
-  prompt += `- If you encounter issues, explain what went wrong\n`;
-  prompt += `- Commit any file changes to git\n`;
-  
-  return prompt;
+  const steps = strategy?.action?.steps || [];
+
+  return [
+    `# Auto-Fix Task: ${type}`,
+    '',
+    `**Problem:** ${description}`,
+    '',
+    '**Action Plan:**',
+    ...steps.map((s, i) => `${i + 1}. ${s}`),
+    '',
+    '**Instructions:**',
+    '- Follow the action plan step by step',
+    '- Document what you did',
+    '- If you encounter issues, explain what went wrong',
+    '- Commit any file changes to git',
+  ].join('\n');
 }
 
 /**
- * Save fix history to JSON file
+ * Save fix history
  */
 async function saveFixesHistory(fixes) {
   if (fixes.length === 0) return;
-  
+
   let history = [];
-  
-  // Load existing history
   try {
     const data = await fs.readFile(FIXES_HISTORY_PATH, 'utf8');
     history = JSON.parse(data);
-  } catch (error) {
-    // File doesn't exist yet, start fresh
-  }
-  
-  // Append new fixes
-  history.push({
-    timestamp: new Date().toISOString(),
-    fixes
-  });
-  
-  // Keep only last 100 fix runs
-  if (history.length > 100) {
-    history = history.slice(-100);
-  }
-  
+  } catch (_) {}
+
+  history.push({ timestamp: new Date().toISOString(), fixes });
+  if (history.length > 100) history = history.slice(-100);
+
   await fs.writeFile(FIXES_HISTORY_PATH, JSON.stringify(history, null, 2));
 }
 
@@ -180,12 +241,9 @@ async function loadFixesHistory() {
   try {
     const data = await fs.readFile(FIXES_HISTORY_PATH, 'utf8');
     return JSON.parse(data);
-  } catch (error) {
+  } catch (_) {
     return [];
   }
 }
 
-module.exports = {
-  executeFixes,
-  loadFixesHistory,
-};
+module.exports = { executeFixes, loadFixesHistory };
