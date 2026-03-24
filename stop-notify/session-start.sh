@@ -5,7 +5,7 @@
 command -v jq >/dev/null 2>&1 || exit 0
 
 INPUT=$(cat)
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id')
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 
 [ -z "$SESSION_ID" ] && exit 0
 
@@ -18,5 +18,5 @@ end tell
 
 [ -z "$TERMINAL_UUID" ] && exit 0
 
-echo "$TERMINAL_UUID" > "/tmp/claude-stop-notify-${SESSION_ID}"
+printf '%s' "$TERMINAL_UUID" > "/tmp/claude-stop-notify-${SESSION_ID}"
 exit 0
