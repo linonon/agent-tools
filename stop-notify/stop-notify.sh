@@ -40,10 +40,19 @@ if [ -n "$TERMINAL_UUID" ]; then
   FOCUS_SCRIPT="/tmp/claude-focus-${SESSION_ID}.sh"
   cat > "$FOCUS_SCRIPT" << SCRIPT
 #!/bin/bash
-osascript -e 'tell application "Ghostty"' \
-  -e 'activate' \
-  -e 'focus (first terminal whose id is "${TERMINAL_UUID}")' \
-  -e 'end tell'
+osascript << 'APPLESCRIPT'
+tell application "Ghostty"
+  activate
+  repeat with w in every window
+    repeat with t in every tab of w
+      if id of focused terminal of t is "${TERMINAL_UUID}" then
+        select tab t
+        return
+      end if
+    end repeat
+  end repeat
+end tell
+APPLESCRIPT
 rm -f "\$0"
 SCRIPT
   chmod +x "$FOCUS_SCRIPT"
