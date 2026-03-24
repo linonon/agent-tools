@@ -1,6 +1,6 @@
 #!/bin/bash
 # Claude Code Stop hook
-# 发送 macOS 通知, 点击跳转到对应 Ghostty tab
+# 发送 macOS 通知, 点击跳转到对应终端窗口 (Ghostty / VSCode)
 
 command -v terminal-notifier >/dev/null 2>&1 || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
@@ -21,31 +21,43 @@ MESSAGE=$(echo "$INPUT" | jq -r '.last_assistant_message // empty')
 AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // empty')
 [ -n "$AGENT_TYPE" ] && exit 0
 
-# 读取 SessionStart 时记录的 terminal UUID
-UUID_FILE="/tmp/claude-stop-notify-${SESSION_ID}"
-TERMINAL_UUID=""
-if [ -f "$UUID_FILE" ]; then
-  TERMINAL_UUID=$(cat "$UUID_FILE")
-  rm -f "$UUID_FILE"
-  # UUID 格式验证
-  [[ "$TERMINAL_UUID" =~ ^[A-F0-9-]+$ ]] || TERMINAL_UUID=""
+# 读取 SessionStart 时记录的终端信息
+NOTIFY_FILE="/tmp/claude-stop-notify-${SESSION_ID}"
+TERM_TYPE=""
+TERM_DATA=""
+if [ -f "$NOTIFY_FILE" ]; then
+  FILE_CONTENT=$(cat "$NOTIFY_FILE")
+  rm -f "$NOTIFY_FILE"
+
+  # 向后兼容: 旧格式是纯 UUID 单行
+  if [[ "$FILE_CONTENT" =~ ^[A-F0-9-]+$ ]]; then
+    TERM_TYPE="ghostty"
+    TERM_DATA="$FILE_CONTENT"
+  else
+    TERM_TYPE=$(echo "$FILE_CONTENT" | grep '^TERM=' | head -1 | cut -d= -f2)
+    TERM_DATA=$(echo "$FILE_CONTENT" | grep '^DATA=' | head -1 | cut -d= -f2-)
+  fi
 fi
 
 PROJECT=$(basename "$CWD")
 # 去换行, 去双引号/反引号 (防 shell 注入), 截取 80 字
 BODY=$(echo "$MESSAGE" | tr '\n' ' ' | tr -d '"\`' | cut -c1-80)
 
-if [ -n "$TERMINAL_UUID" ]; then
-  # 写临时 focus 脚本, 避免引号嵌套
-  FOCUS_SCRIPT="/tmp/claude-focus-${SESSION_ID}.sh"
-  cat > "$FOCUS_SCRIPT" << SCRIPT
+FOCUS_SCRIPT="/tmp/claude-focus-${SESSION_ID}.sh"
+
+case "$TERM_TYPE" in
+  ghostty)
+    # UUID 格式验证
+    [[ "$TERM_DATA" =~ ^[A-F0-9-]+$ ]] || TERM_TYPE=""
+    if [ -n "$TERM_TYPE" ]; then
+      cat > "$FOCUS_SCRIPT" << SCRIPT
 #!/bin/bash
 osascript << 'APPLESCRIPT'
 tell application "Ghostty"
   activate
   repeat with w in every window
     repeat with t in every tab of w
-      if id of focused terminal of t is "${TERMINAL_UUID}" then
+      if id of focused terminal of t is "${TERM_DATA}" then
         select tab t
         return
       end if
@@ -55,21 +67,55 @@ end tell
 APPLESCRIPT
 rm -f "\$0"
 SCRIPT
-  chmod +x "$FOCUS_SCRIPT"
+      chmod +x "$FOCUS_SCRIPT"
 
-  # 后台运行, 不阻塞 hook
-  terminal-notifier \
-    -title "Claude Code - ${PROJECT}" \
-    -message "${BODY}" \
-    -group "${SESSION_ID}" \
-    -execute "$FOCUS_SCRIPT" &
-else
-  # 降级: 只激活 Ghostty, 不指定 tab
-  terminal-notifier \
-    -title "Claude Code - ${PROJECT}" \
-    -message "${BODY}" \
-    -group "${SESSION_ID}" \
-    -activate "com.mitchellh.ghostty" &
-fi
+      terminal-notifier \
+        -title "Claude Code - ${PROJECT}" \
+        -message "${BODY}" \
+        -group "${SESSION_ID}" \
+        -execute "$FOCUS_SCRIPT" &
+    fi
+    ;;
+  vscode)
+    # CWD 安全检查: 包含双引号则降级
+    if [[ "$TERM_DATA" == *'"'* ]]; then
+      terminal-notifier \
+        -title "Claude Code - ${PROJECT}" \
+        -message "${BODY}" \
+        -group "${SESSION_ID}" \
+        -activate "com.microsoft.VSCode" &
+    else
+      cat > "$FOCUS_SCRIPT" << SCRIPT
+#!/bin/bash
+osascript << 'APPLESCRIPT'
+tell application "Code"
+  activate
+  repeat with w in every window
+    if name of w contains "${TERM_DATA}" then
+      set index of w to 1
+      exit repeat
+    end if
+  end repeat
+end tell
+APPLESCRIPT
+rm -f "\$0"
+SCRIPT
+      chmod +x "$FOCUS_SCRIPT"
+
+      terminal-notifier \
+        -title "Claude Code - ${PROJECT}" \
+        -message "${BODY}" \
+        -group "${SESSION_ID}" \
+        -execute "$FOCUS_SCRIPT" &
+    fi
+    ;;
+  *)
+    # 降级: 只发通知, 不做窗口跳转
+    terminal-notifier \
+      -title "Claude Code - ${PROJECT}" \
+      -message "${BODY}" \
+      -group "${SESSION_ID}" &
+    ;;
+esac
 
 exit 0
