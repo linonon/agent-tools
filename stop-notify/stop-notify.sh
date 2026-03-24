@@ -6,13 +6,16 @@ command -v terminal-notifier >/dev/null 2>&1 || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
 
 INPUT=$(cat)
-STOP_ACTIVE=$(echo "$INPUT" | jq -r '.stop_hook_active')
+STOP_ACTIVE=$(echo "$INPUT" | jq -r '.stop_hook_active // empty')
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 MESSAGE=$(echo "$INPUT" | jq -r '.last_assistant_message // empty')
 
 # 防无限循环
 [ "$STOP_ACTIVE" = "true" ] && exit 0
+
+# SESSION_ID 格式验证 (防路径注入)
+[[ "$SESSION_ID" =~ ^[a-zA-Z0-9_-]+$ ]] || exit 0
 
 # 跳过 subagent
 AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // empty')
@@ -24,6 +27,8 @@ TERMINAL_UUID=""
 if [ -f "$UUID_FILE" ]; then
   TERMINAL_UUID=$(cat "$UUID_FILE")
   rm -f "$UUID_FILE"
+  # UUID 格式验证
+  [[ "$TERMINAL_UUID" =~ ^[A-F0-9-]+$ ]] || TERMINAL_UUID=""
 fi
 
 PROJECT=$(basename "$CWD")

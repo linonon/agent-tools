@@ -8,6 +8,7 @@ INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 
 [ -z "$SESSION_ID" ] && exit 0
+[[ "$SESSION_ID" =~ ^[a-zA-Z0-9_-]+$ ]] || exit 0
 
 TERMINAL_UUID=$(osascript -e '
 tell application "Ghostty"
